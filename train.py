@@ -179,12 +179,17 @@ class CropDataset(Dataset):
 
     def __init__(self, images_dir, annotations_file, image_ids,
                  cat_mapping, min_crop_size=10, transform=None):
-        self.images_dir   = images_dir
-        self.coco         = COCO(annotations_file)
-        self.cat_mapping  = cat_mapping  # {coco_cat_id: class_idx (0-based)}
+        self.images_dir    = images_dir
+        self.coco          = COCO(annotations_file)
+        self.cat_mapping   = cat_mapping  # {coco_cat_id: class_idx (0-based)}
         self.min_crop_size = min_crop_size
-        self.transform    = transform
-        self.samples      = self._build_samples(image_ids)
+        self.transform     = transform
+        # Vérifie que tous les indices sont valides avant d'entrer dans la boucle
+        max_idx = max(cat_mapping.values()) if cat_mapping else -1
+        if max_idx < 0:
+            raise ValueError("cat_mapping vide — aucune catégorie COCO ne correspond aux classes yaml.")
+        self.num_classes = max_idx + 1
+        self.samples     = self._build_samples(image_ids)
 
     def _build_samples(self, image_ids):
         samples = []
@@ -322,9 +327,17 @@ def train_perso():
     os.makedirs(weights_dir, exist_ok=True)
 
     # Split
-    coco        = COCO(CONFIG["annotations_file"])
-    cat_ids     = coco.getCatIds()
-    cat_mapping = {cat_id: idx for idx, cat_id in enumerate(cat_ids)}  # 0-based
+    coco = COCO(CONFIG["annotations_file"])
+
+    # Mapping par NOM de classe (robuste si le COCO contient des catégories extra
+    # ou dans un ordre différent — évite les labels hors-range)
+    name_to_idx = {name: idx for idx, name in enumerate(class_names)}
+    cat_mapping = {}
+    for cat_id in coco.getCatIds():
+        cat_name = coco.cats[cat_id]['name']
+        if cat_name in name_to_idx:
+            cat_mapping[cat_id] = name_to_idx[cat_name]
+    print(f"   Mapping COCO → classe: { {coco.cats[k]['name']: v for k, v in cat_mapping.items()} }")
 
     train_ids, val_ids, test_ids, split_stats = stratified_split(
         coco, CONFIG["train_split"], CONFIG["val_split"], CONFIG["test_split"], seed=42
