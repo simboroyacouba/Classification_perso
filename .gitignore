@@ -1,0 +1,9 @@
+outputs
+evaluation/
+predictions/
+runs/
+output/
+*.pt
+*.pth
+*.keras
+final_classification_model.keras
