@@ -80,8 +80,12 @@ CONFIG = {
     "min_crop_size":    int(os.getenv("MIN_CROP_SIZE", "10")),
 
     # Phases de fine-tuning
-    "freeze_epochs":    int(os.getenv("FREEZE_EPOCHS", "10")),  # Phase 1 : backbone gelé
-    "lr_backbone":      float(os.getenv("LR_BACKBONE",  "1e-5")),  # Phase 2 : LR backbone
+    "freeze_epochs":    int(os.getenv("FREEZE_EPOCHS", "10")),
+    "lr_backbone":      float(os.getenv("LR_BACKBONE",  "1e-5")),
+
+    # Background mining : crops "vides" pour apprendre à rejeter le fond
+    "bg_crops_per_img": int(os.getenv("BG_CROPS_PER_IMG", "3")),   # crops bg par image
+    "bg_iou_threshold": float(os.getenv("BG_IOU_THRESHOLD", "0.1")),  # IoU max avec GT
 }
 
 IMAGE_SIZE = 299  # Même taille que le modèle original
@@ -171,25 +175,72 @@ def get_val_transforms():
     ])
 
 
+def _iou_xywh(box_a, box_b):
+    """IoU entre deux boîtes [x, y, w, h]."""
+    ax1, ay1 = box_a[0], box_a[1]
+    ax2, ay2 = ax1 + box_a[2], ay1 + box_a[3]
+    bx1, by1 = box_b[0], box_b[1]
+    bx2, by2 = bx1 + box_b[2], by1 + box_b[3]
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    union = box_a[2] * box_a[3] + box_b[2] * box_b[3] - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _mine_background_crops(img_w, img_h, gt_bboxes, n=3,
+                            iou_threshold=0.1, min_size=32, seed=None):
+    """
+    Génère jusqu'à n crops aléatoires dont l'IoU avec tous les GT < iou_threshold.
+    Retourne une liste de (x, y, w, h).
+    """
+    rng   = np.random.RandomState(seed)
+    crops = []
+    for _ in range(n * 20):           # essais max
+        if len(crops) >= n:
+            break
+        scale = rng.uniform(0.05, 0.4)
+        w     = max(min_size, int(min(img_w, img_h) * scale))
+        h     = max(min_size, int(min(img_w, img_h) * scale * rng.uniform(0.7, 1.4)))
+        w     = min(w, img_w);  h = min(h, img_h)
+        x     = rng.randint(0, max(1, img_w - w))
+        y     = rng.randint(0, max(1, img_h - h))
+        crop_box = (x, y, w, h)
+        max_iou  = max((_iou_xywh(crop_box, gt) for gt in gt_bboxes), default=0.0)
+        if max_iou < iou_threshold:
+            crops.append(crop_box)
+    return crops
+
+
 class CropDataset(Dataset):
     """
-    Extrait et classifie les crops de bboxes depuis un dataset COCO.
-    Chaque exemple = (crop_image, label_classe).
+    Extrait et classifie les crops depuis un dataset COCO.
+    - Crops positifs  : regions annotées (classes 0..N-1)
+    - Crops background: regions aléatoires sans objet (classe N = background)
+      → permet au modèle de rejeter le fond pendant le sliding window
+
+    bg_crops_per_img=0 désactive le background mining (mode évaluation).
     """
 
+    BACKGROUND_LABEL = None  # défini dynamiquement à num_object_classes
+
     def __init__(self, images_dir, annotations_file, image_ids,
-                 cat_mapping, min_crop_size=10, transform=None):
-        self.images_dir    = images_dir
-        self.coco          = COCO(annotations_file)
-        self.cat_mapping   = cat_mapping  # {coco_cat_id: class_idx (0-based)}
-        self.min_crop_size = min_crop_size
-        self.transform     = transform
-        # Vérifie que tous les indices sont valides avant d'entrer dans la boucle
+                 cat_mapping, min_crop_size=10, transform=None,
+                 bg_crops_per_img=0, bg_iou_threshold=0.1):
+        self.images_dir       = images_dir
+        self.coco             = COCO(annotations_file)
+        self.cat_mapping      = cat_mapping
+        self.min_crop_size    = min_crop_size
+        self.transform        = transform
+        self.bg_crops_per_img = bg_crops_per_img
+        self.bg_iou_threshold = bg_iou_threshold
+
         max_idx = max(cat_mapping.values()) if cat_mapping else -1
         if max_idx < 0:
             raise ValueError("cat_mapping vide — aucune catégorie COCO ne correspond aux classes yaml.")
-        self.num_classes = max_idx + 1
-        self.samples     = self._build_samples(image_ids)
+        self.num_object_classes = max_idx + 1
+        self.background_label   = self.num_object_classes  # dernier indice
+        self.samples            = self._build_samples(image_ids)
 
     def _build_samples(self, image_ids):
         samples = []
@@ -198,6 +249,8 @@ class CropDataset(Dataset):
             img_path = os.path.join(self.images_dir, img_info['file_name'])
             if not os.path.exists(img_path):
                 continue
+
+            gt_bboxes = []
             for ann in self.coco.loadAnns(self.coco.getAnnIds(imgIds=img_id)):
                 if ann.get('iscrowd', 0):
                     continue
@@ -207,13 +260,31 @@ class CropDataset(Dataset):
                 x, y, w, h = ann['bbox']
                 if w < self.min_crop_size or h < self.min_crop_size:
                     continue
+                gt_bboxes.append((x, y, w, h))
                 samples.append({
-                    'img_path':  img_path,
-                    'bbox':      (x, y, w, h),
-                    'label':     class_idx,
-                    'image_id':  img_id,
-                    'ann_id':    ann['id'],
+                    'img_path': img_path,
+                    'bbox':     (x, y, w, h),
+                    'label':    class_idx,
+                    'image_id': img_id,
                 })
+
+            # Background mining
+            if self.bg_crops_per_img > 0 and gt_bboxes:
+                img_w = img_info['width']
+                img_h = img_info['height']
+                bg_crops = _mine_background_crops(
+                    img_w, img_h, gt_bboxes,
+                    n=self.bg_crops_per_img,
+                    iou_threshold=self.bg_iou_threshold,
+                    seed=img_id,
+                )
+                for bbox in bg_crops:
+                    samples.append({
+                        'img_path': img_path,
+                        'bbox':     bbox,
+                        'label':    self.background_label,
+                        'image_id': img_id,
+                    })
         return samples
 
     def __len__(self):
@@ -304,8 +375,11 @@ def train_one_epoch(model, optimizer, dataloader, criterion, device):
 
 def train_perso():
     CONFIG["classes"] = load_classes(CONFIG["classes_file"])
-    num_classes       = len(CONFIG["classes"])
     class_names       = CONFIG["classes"]
+    bg_per_img        = CONFIG["bg_crops_per_img"]
+    # +1 classe background si le mining est activé
+    num_classes       = len(class_names) + (1 if bg_per_img > 0 else 0)
+    all_class_names   = class_names + (['background'] if bg_per_img > 0 else [])
 
     print("=" * 70)
     print("   EfficientNet-B3 Perso — Classification des Toitures")
@@ -313,7 +387,8 @@ def train_perso():
     print(f"\n📋 CONFIG (.env)")
     print(f"   Images:      {CONFIG['images_dir']}")
     print(f"   Annotations: {CONFIG['annotations_file']}")
-    print(f"   Classes:     {num_classes} ({', '.join(class_names)})")
+    print(f"   Classes:     {num_classes} ({', '.join(all_class_names)})")
+    print(f"   Background:  {bg_per_img} crops/image (IoU < {CONFIG['bg_iou_threshold']})")
     print(f"   Epochs:      {CONFIG['num_epochs']} | Batch: {CONFIG['batch_size']} | LR: {CONFIG['learning_rate']}")
     print(f"   Phase 1:     {CONFIG['freeze_epochs']} epochs backbone gelé")
     print(f"   Image size:  {IMAGE_SIZE}px")
@@ -351,7 +426,9 @@ def train_perso():
         'images_dir':       os.path.abspath(CONFIG["images_dir"]),
         'annotations_file': os.path.abspath(CONFIG["annotations_file"]),
         'num_test_images':  len(test_ids),
-        'classes':          class_names,
+        'classes':          class_names,       # classes objet uniquement
+        'all_classes':      all_class_names,   # inclut background si activé
+        'background_label': num_classes - 1 if bg_per_img > 0 else None,
         'image_size':       IMAGE_SIZE,
         'min_crop_size':    CONFIG["min_crop_size"],
     }
@@ -362,15 +439,21 @@ def train_perso():
     train_dataset = CropDataset(
         CONFIG["images_dir"], CONFIG["annotations_file"],
         train_ids, cat_mapping, CONFIG["min_crop_size"],
-        transform=get_train_transforms()
+        transform=get_train_transforms(),
+        bg_crops_per_img=bg_per_img,
+        bg_iou_threshold=CONFIG["bg_iou_threshold"],
     )
     val_dataset = CropDataset(
         CONFIG["images_dir"], CONFIG["annotations_file"],
         val_ids, cat_mapping, CONFIG["min_crop_size"],
-        transform=get_val_transforms()
+        transform=get_val_transforms(),
+        bg_crops_per_img=bg_per_img,
+        bg_iou_threshold=CONFIG["bg_iou_threshold"],
     )
 
-    print(f"\n   Train crops: {len(train_dataset)} | Val crops: {len(val_dataset)}")
+    bg_train = sum(1 for s in train_dataset.samples if s['label'] == train_dataset.background_label)
+    bg_val   = sum(1 for s in val_dataset.samples   if s['label'] == val_dataset.background_label)
+    print(f"\n   Train crops: {len(train_dataset)} ({bg_train} bg) | Val crops: {len(val_dataset)} ({bg_val} bg)")
 
     train_loader = DataLoader(train_dataset, batch_size=CONFIG["batch_size"],
                               shuffle=True, num_workers=0, pin_memory=True)
@@ -457,10 +540,12 @@ def train_perso():
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_acc':    best_acc,
-                'num_classes': num_classes,
-                'classes':    class_names,
-                'cat_mapping': cat_mapping,
-                'image_size': IMAGE_SIZE,
+                'num_classes':      num_classes,
+                'classes':          class_names,
+                'all_classes':      all_class_names,
+                'background_label': num_classes - 1 if bg_per_img > 0 else None,
+                'cat_mapping':      cat_mapping,
+                'image_size':       IMAGE_SIZE,
             }, os.path.join(weights_dir, "best.pth"))
             print(f"   💾 Meilleur modèle sauvegardé (val_acc: {best_acc:.4f})")
 
@@ -470,10 +555,12 @@ def train_perso():
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_acc':    val_acc,
-                'num_classes': num_classes,
-                'classes':    class_names,
-                'cat_mapping': cat_mapping,
-                'image_size': IMAGE_SIZE,
+                'num_classes':      num_classes,
+                'classes':          class_names,
+                'all_classes':      all_class_names,
+                'background_label': num_classes - 1 if bg_per_img > 0 else None,
+                'cat_mapping':      cat_mapping,
+                'image_size':       IMAGE_SIZE,
             }, os.path.join(weights_dir, "last.pth"))
 
         gc.collect()
