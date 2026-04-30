@@ -74,12 +74,33 @@ def run_evaluation(model, dataloader, class_names, device):
     return (np.array(all_labels), np.array(all_preds), np.array(all_probs))
 
 
+def find_best_model(runs_dir="runs/classify/train"):
+    """Cherche best_model.pth dans le run le plus récent."""
+    if not os.path.isdir(runs_dir):
+        return None
+    runs = sorted(
+        [os.path.join(runs_dir, d) for d in os.listdir(runs_dir)
+         if os.path.isdir(os.path.join(runs_dir, d))],
+        key=os.path.getmtime, reverse=True
+    )
+    for run in runs:
+        candidate = os.path.join(run, "best_model.pth")
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
 def evaluate():
-    model_path = CONFIG["model_path"]
+    model_path = CONFIG["model_path"] or find_best_model()
     if not model_path:
-        raise ValueError("MODEL_PATH non défini dans .env ou variable d'environnement")
+        raise FileNotFoundError(
+            "Aucun modèle trouvé. Définir MODEL_PATH dans .env "
+            "ou lancer train.py d'abord."
+        )
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Modèle introuvable: {model_path}")
+    print(f"   Modèle auto-détecté: {model_path}"
+          if not CONFIG["model_path"] else "")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")

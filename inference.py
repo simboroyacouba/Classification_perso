@@ -168,21 +168,43 @@ def infer_directory(model, dir_path, class_names, image_size, device, output_dir
     return results
 
 
+def find_best_model(runs_dir="runs/classify/train"):
+    """Retourne le best_model.pth du run le plus récent."""
+    if not os.path.isdir(runs_dir):
+        return None
+    runs = sorted(
+        [os.path.join(runs_dir, d) for d in os.listdir(runs_dir)
+         if os.path.isdir(os.path.join(runs_dir, d))],
+        key=os.path.getmtime, reverse=True
+    )
+    for run in runs:
+        candidate = os.path.join(run, "best_model.pth")
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Inférence EfficientNet-B3 Perso")
-    parser.add_argument('--model', required=True, help="Chemin vers best_model.pth")
-    parser.add_argument('--image', default=None, help="Image à classifier")
-    parser.add_argument('--dir',   default=None, help="Dossier d'images")
-    parser.add_argument('--bbox',  default=None,
-                        help="Bbox à cropper: 'x,y,w,h' en pixels")
-    parser.add_argument('--output', default="./predictions",
-                        help="Dossier de sortie pour les visualisations")
+    parser.add_argument('--model',  default=None, help="Chemin vers best_model.pth (auto-détecté si omis)")
+    parser.add_argument('--image',  default=None, help="Image à classifier")
+    parser.add_argument('--dir',    default=None, help="Dossier d'images")
+    parser.add_argument('--bbox',   default=None, help="Bbox à cropper: 'x,y,w,h' en pixels")
+    parser.add_argument('--output', default="./predictions", help="Dossier de sortie")
     args = parser.parse_args()
+
+    model_path = args.model or find_best_model()
+    if not model_path:
+        parser.error("Aucun modèle trouvé. Spécifier --model ou lancer train.py d'abord.")
+    if not os.path.exists(model_path):
+        parser.error(f"Modèle introuvable: {model_path}")
+    if not args.model:
+        print(f"   Modèle auto-détecté: {model_path}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    model, class_names, image_size = load_model(args.model, device)
+    model, class_names, image_size = load_model(model_path, device)
     print(f"Classes: {class_names} | Image size: {image_size}px")
 
     bbox = None
