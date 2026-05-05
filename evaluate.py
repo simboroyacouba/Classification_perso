@@ -305,6 +305,48 @@ def compute_map(all_preds, all_gts, class_names, iou_threshold=0.5):
     return aps
 
 
+def compute_detection_prf(all_preds, all_gts, class_names, iou_threshold=0.5):
+    """
+    Précision, Rappel et F1 par classe à seuil de score fixe (après NMS).
+    - TP : prédiction matchée à un GT de même classe avec IoU >= iou_threshold
+    - FP : prédiction non matchée
+    - FN : GT non matchée par aucune prédiction
+    Retourne (per_class_dict, macro_precision, macro_recall, macro_f1)
+    """
+    per_class = {}
+    for cls_name in class_names:
+        tp = fp = fn = 0
+        for pred, gt in zip(all_preds, all_gts):
+            p_boxes = [b for b, l in zip(pred['boxes'], pred['labels']) if l == cls_name]
+            g_boxes = [b for b, l in zip(gt['boxes'],  gt['labels'])  if l == cls_name]
+            matched_gt   = set()
+            matched_pred = set()
+            for pi, pb in enumerate(p_boxes):
+                if not g_boxes:
+                    fp += 1; continue
+                ious   = [_iou(pb, gb) for gb in g_boxes]
+                best_j = int(np.argmax(ious))
+                if ious[best_j] >= iou_threshold and best_j not in matched_gt:
+                    matched_gt.add(best_j)
+                    matched_pred.add(pi)
+                    tp += 1
+                else:
+                    fp += 1
+            fn += len(g_boxes) - len(matched_gt)
+
+        prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        rec  = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1   = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
+        per_class[cls_name] = {'precision': prec, 'recall': rec, 'f1': f1,
+                               'tp': tp, 'fp': fp, 'fn': fn}
+
+    valid    = [v for v in per_class.values()]
+    macro_p  = float(np.mean([v['precision'] for v in valid])) if valid else 0.0
+    macro_r  = float(np.mean([v['recall']    for v in valid])) if valid else 0.0
+    macro_f1 = float(np.mean([v['f1']        for v in valid])) if valid else 0.0
+    return per_class, macro_p, macro_r, macro_f1
+
+
 def run_detection_evaluation(model, coco, images_dir, test_image_ids,
                               cat_mapping, class_names, image_size, device,
                               score_threshold, nms_iou, iou_threshold,
@@ -364,21 +406,35 @@ def run_detection_evaluation(model, coco, images_dir, test_image_ids,
         print("   ❌ Aucune image de test trouvée sur disque.")
         return None
 
-    aps   = compute_map(all_preds, all_gts, class_names, iou_threshold)
-    map50 = float(np.mean(list(aps.values()))) if aps else 0.0
+    aps                    = compute_map(all_preds, all_gts, class_names, iou_threshold)
+    map50                  = float(np.mean(list(aps.values()))) if aps else 0.0
+    per_class_prf, macro_p, macro_r, macro_f1 = compute_detection_prf(
+        all_preds, all_gts, class_names, iou_threshold
+    )
 
-    print(f"\n   mAP@{int(iou_threshold*100)}: {map50:.4f} ({map50*100:.2f}%)")
-    print(f"   AP par classe:")
-    for name, ap in aps.items():
-        print(f"      {name:<30} AP={ap:.4f}")
-    print(f"   Temps: {format_time(elapsed)} ({len(all_gts)} images)")
+    iou_pct = int(iou_threshold * 100)
+    print(f"\n   mAP@{iou_pct}:          {map50:.4f} ({map50*100:.2f}%)")
+    print(f"   Précision macro: {macro_p:.4f}")
+    print(f"   Rappel macro:    {macro_r:.4f}")
+    print(f"   F1 macro:        {macro_f1:.4f}")
+    print(f"\n   {'Classe':<30} {'AP':>7} {'Prec':>7} {'Recall':>7} {'F1':>7}")
+    print(f"   {'-'*58}")
+    for name in class_names:
+        ap  = aps.get(name, 0.0)
+        prf = per_class_prf.get(name, {'precision': 0.0, 'recall': 0.0, 'f1': 0.0})
+        print(f"   {name:<30} {ap:>7.4f} {prf['precision']:>7.4f} {prf['recall']:>7.4f} {prf['f1']:>7.4f}")
+    print(f"\n   Temps: {format_time(elapsed)} ({len(all_gts)} images)")
 
     return {
-        'mode': 'detection',
+        'mode':            'detection',
         'num_test_images': len(all_gts),
-        'map50': map50,
-        'ap_per_class': aps,
-        'iou_threshold': iou_threshold,
+        'map50':           map50,
+        'precision_macro': float(macro_p),
+        'recall_macro':    float(macro_r),
+        'f1_macro':        float(macro_f1),
+        'ap_per_class':    aps,
+        'per_class_metrics': per_class_prf,
+        'iou_threshold':   iou_threshold,
         'score_threshold': score_threshold,
         'inference_time_seconds': float(elapsed),
     }
@@ -410,7 +466,7 @@ def _save_confusion_matrix(cm, class_names, path, title="Matrice de Confusion"):
 # MAIN
 # =============================================================================
 
-def evaluate(mode='crops', score_threshold=None, nms_iou=None):
+def evaluate(mode='both', score_threshold=None, nms_iou=None):
     model_path = CONFIG["model_path"] or find_best_model()
     if not model_path:
         raise FileNotFoundError(
@@ -472,9 +528,9 @@ def evaluate(mode='crops', score_threshold=None, nms_iou=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Évaluation EfficientNet-B3 Perso")
-    parser.add_argument('--mode',            default='crops',
+    parser.add_argument('--mode',            default='both',
                         choices=['crops', 'detect', 'both'],
-                        help="Mode d'évaluation (défaut: crops)")
+                        help="Mode d'évaluation (défaut: both)")
     parser.add_argument('--score-threshold', default=None, type=float,
                         help="Seuil confiance pour détection (défaut: .env SCORE_THRESHOLD)")
     parser.add_argument('--nms-iou',         default=None, type=float,

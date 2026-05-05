@@ -26,6 +26,12 @@ import matplotlib.pyplot as plt
 
 from model import build_model
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD  = [0.229, 0.224, 0.225]
 
@@ -355,6 +361,12 @@ def infer_directory(model, dir_path, class_names, image_size, device,
 # =============================================================================
 
 def find_best_model(runs_dir="runs/classify/train"):
+    # Priorité 1 : MODEL_PATH dans .env
+    env_path = os.getenv("MODEL_PATH", "")
+    if env_path and os.path.exists(env_path):
+        return env_path
+
+    # Priorité 2 : run le plus récent dans runs/classify/train/
     if not os.path.isdir(runs_dir):
         return None
     runs = sorted(

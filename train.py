@@ -530,7 +530,7 @@ def train_perso():
               f" | LR: {current_lr:.2e} | ⏱️ {format_time(time.time()-epoch_start)}")
         if per_class_acc:
             for cls_idx, acc in per_class_acc.items():
-                name = class_names[cls_idx] if cls_idx < len(class_names) else f"class_{cls_idx}"
+                name = all_class_names[cls_idx] if cls_idx < len(all_class_names) else f"class_{cls_idx}"
                 print(f"      {name:<30} Acc={acc:.3f}")
 
         if val_acc > best_acc:
@@ -572,7 +572,7 @@ def train_perso():
         model, val_loader, criterion, device, num_classes
     )
     cm = confusion_matrix(all_labels, all_preds)
-    report = classification_report(all_labels, all_preds, target_names=class_names, zero_division=0)
+    report = classification_report(all_labels, all_preds, target_names=all_class_names, zero_division=0)
     print(f"\n📊 Rapport final (validation):\n{report}")
 
     # Copies des checkpoints
