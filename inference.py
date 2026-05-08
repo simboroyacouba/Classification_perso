@@ -36,10 +36,11 @@ IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD  = [0.229, 0.224, 0.225]
 
 COLORS = {
-    'panneau_solaire':     (255, 50,  50),
-    'batiment_peint':      (50,  200, 50),
-    'batiment_non_enduit': (50,  50,  255),
-    'batiment_enduit':     (255, 165, 0),
+    'panneau_solaire':       (255, 50,  50),
+    'batiment_peint':        (50,  200, 50),
+    'batiment_non_enduit':   (50,  50,  255),
+    'batiment_enduit':       (255, 165, 0),
+    'menuiserie_metallique': (128, 0,   128),
 }
 
 SCALES       = [0.15, 0.25, 0.40, 0.60]  # fraction de min(W, H)

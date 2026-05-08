@@ -3,20 +3,23 @@
 # IMPORTANT: L'ordre correspond aux IDs de catégories CVAT/COCO
 
 classes:
-  - panneau_solaire       # index 0 (COCO category id: 1)
-  - batiment_peint        # index 1 (COCO category id: 2)
-  - batiment_non_enduit   # index 2 (COCO category id: 3)
-  - batiment_enduit       # index 3 (COCO category id: 4)
+  - panneau_solaire         # index 0 — nadir  (COCO category id: 1)
+  - batiment_peint          # index 1 — oblique (COCO category id: 2)
+  - batiment_non_enduit     # index 2 — oblique (COCO category id: 3)
+  - batiment_enduit         # index 3 — oblique (COCO category id: 4)
+  - menuiserie_metallique   # index 4 — oblique (COCO category id: 5)
 
 # Couleurs pour la visualisation (RGB)
 colors:
-  panneau_solaire:      [255, 0,   0]    # Rouge
-  batiment_peint:       [0,   200, 0]    # Vert
-  batiment_non_enduit:  [0,   0,   255]  # Bleu
-  batiment_enduit:      [255, 165, 0]    # Orange
+  panneau_solaire:        [255, 0,   0]     # Rouge
+  batiment_peint:         [0,   200, 0]     # Vert
+  batiment_non_enduit:    [0,   0,   255]   # Bleu
+  batiment_enduit:        [255, 165, 0]     # Orange
+  menuiserie_metallique:  [128, 0,   128]   # Violet
 
 descriptions:
-  panneau_solaire:      "Tôle ondulée métallique"
-  batiment_peint:       "Tôle bac acier"
-  batiment_non_enduit:  "Tuiles en terre cuite ou béton"
-  batiment_enduit:      "Dalle béton (toit plat)"
+  panneau_solaire:        "Panneau solaire (nadir)"
+  batiment_peint:         "Batiment enduit peint (oblique)"
+  batiment_non_enduit:    "Batiment non enduit (oblique)"
+  batiment_enduit:        "Batiment enduit (oblique)"
+  menuiserie_metallique:  "Menuiserie metallique (oblique)"
