@@ -360,24 +360,32 @@ def infer_directory(model, dir_path, class_names, image_size, device,
 # AUTO-DÉTECTION DU MODÈLE
 # =============================================================================
 
-def find_best_model(runs_dir="runs/classify/train"):
-    # Priorité 1 : MODEL_PATH dans .env
+def find_best_model():
+    """Cherche le meilleur modele perso dans les dossiers de sortie du train.py."""
     env_path = os.getenv("MODEL_PATH", "")
     if env_path and os.path.exists(env_path):
         return env_path
 
-    # Priorité 2 : run le plus récent dans runs/classify/train/
-    if not os.path.isdir(runs_dir):
-        return None
-    runs = sorted(
-        [os.path.join(runs_dir, d) for d in os.listdir(runs_dir)
-         if os.path.isdir(os.path.join(runs_dir, d))],
-        key=os.path.getmtime, reverse=True
-    )
-    for run in runs:
-        candidate = os.path.join(run, "best_model.pth")
-        if os.path.exists(candidate):
-            return candidate
+    base_output = os.getenv("OUTPUT_DIR", "./output")
+    search_dirs = [
+        os.path.join(base_output, "runs", "classify"),          # unified
+        os.path.join(base_output, "nadir", "runs", "classify"), # dual nadir
+        os.path.join(base_output, "oblique", "runs", "classify"),# dual oblique
+        "runs/classify/train",                                    # legacy
+    ]
+    for runs_dir in search_dirs:
+        if not os.path.isdir(runs_dir):
+            continue
+        runs = sorted(
+            [os.path.join(runs_dir, d) for d in os.listdir(runs_dir)
+             if os.path.isdir(os.path.join(runs_dir, d))
+             and d.startswith("perso_")],
+            key=os.path.getmtime, reverse=True,
+        )
+        for run in runs:
+            candidate = os.path.join(run, "best_model.pth")
+            if os.path.exists(candidate):
+                return candidate
     return None
 
 
@@ -429,7 +437,28 @@ def main():
                         background_label=background_label,
                         output_dir=args.output)
     else:
-        parser.print_help()
+        # Auto-detection du dossier d'images
+        auto_dir = None
+        for candidate in (
+            os.getenv("DETECTION_INFERENCE_IMAGES_DIR", ""),
+            os.getenv("DETECTION_TEST_IMAGES_DIR", ""),
+            "./test_images", "./images", "../test",
+        ):
+            if candidate and os.path.isdir(candidate):
+                auto_dir = candidate
+                break
+        if auto_dir:
+            print(f"   Dossier auto-detecte: {auto_dir}")
+            infer_directory(model, auto_dir, class_names, image_size, device,
+                            score_threshold=args.score_threshold,
+                            nms_iou=args.nms_iou,
+                            background_label=background_label,
+                            output_dir=args.output)
+        else:
+            print("   Aucun dossier d'images trouve.")
+            print("   Utilisez : python inference.py --image photo.jpg")
+            print("              python inference.py --dir dossier/images/")
+            print("   Ou definir DETECTION_INFERENCE_IMAGES_DIR dans .env")
 
 
 if __name__ == "__main__":

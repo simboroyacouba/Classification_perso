@@ -59,18 +59,35 @@ CONFIG = {
 # AUTO-DÉTECTION DU MODÈLE
 # =============================================================================
 
-def find_best_model(runs_dir="runs/classify/train"):
-    if not os.path.isdir(runs_dir):
-        return None
-    runs = sorted(
-        [os.path.join(runs_dir, d) for d in os.listdir(runs_dir)
-         if os.path.isdir(os.path.join(runs_dir, d))],
-        key=os.path.getmtime, reverse=True
-    )
-    for run in runs:
-        candidate = os.path.join(run, "best_model.pth")
-        if os.path.exists(candidate):
-            return candidate
+def find_best_model(sub=None):
+    """
+    Cherche le best_model.pth le plus recent dans :
+      ./output[/nadir|oblique]/runs/classify/perso_<mode>_<ts>/best_model.pth
+    sub = None → unifie, sub = "nadir"|"oblique" → dual
+    """
+    base_output = os.getenv("OUTPUT_DIR", "./output")
+    prefix = f"perso_{sub}_" if sub else "perso_"
+
+    search_dirs = []
+    if sub:
+        search_dirs.append(os.path.join(base_output, sub, "runs", "classify"))
+    else:
+        search_dirs.append(os.path.join(base_output, "runs", "classify"))
+        # Legacy
+        search_dirs.append("runs/classify/train")
+
+    for runs_dir in search_dirs:
+        if not os.path.isdir(runs_dir):
+            continue
+        runs = sorted(
+            [os.path.join(runs_dir, d) for d in os.listdir(runs_dir)
+             if os.path.isdir(os.path.join(runs_dir, d)) and d.startswith(prefix)],
+            key=os.path.getmtime, reverse=True,
+        )
+        for run in runs:
+            candidate = os.path.join(run, "best_model.pth")
+            if os.path.exists(candidate):
+                return candidate
     return None
 
 
@@ -466,41 +483,37 @@ def _save_confusion_matrix(cm, class_names, path, title="Matrice de Confusion"):
 # MAIN
 # =============================================================================
 
-def evaluate(mode='both', score_threshold=None, nms_iou=None):
-    model_path = CONFIG["model_path"] or find_best_model()
-    if not model_path:
-        raise FileNotFoundError(
-            "Aucun modèle trouvé. Définir MODEL_PATH dans .env ou lancer train.py."
-        )
-    if not os.path.exists(model_path):
-        raise FileNotFoundError(f"Modèle introuvable: {model_path}")
-    if not CONFIG["model_path"]:
-        print(f"   Modèle auto-détecté: {model_path}")
-
-    score_threshold = score_threshold or CONFIG["score_threshold"]
-    nms_iou         = nms_iou         or CONFIG["nms_iou"]
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+def _evaluate_one(model_path, eval_mode, score_threshold, nms_iou, device, label=""):
+    """Evalue un modele sur son test set. Retourne results dict ou None."""
+    if not model_path or not os.path.exists(model_path):
+        return None
+    print(f"\n{'─'*60}")
+    if label:
+        print(f"   [{label.upper()}]  {model_path}")
+    print(f"{'─'*60}")
 
     model, class_names, cat_mapping, image_size, background_label = load_model(model_path, device)
-    num_classes = len(class_names)
 
-    test_info        = load_test_info(model_path)
-    images_dir, annotations_file = resolve_paths(test_info)
-    test_image_ids   = test_info['test_image_ids']
-    min_crop_size    = test_info.get('min_crop_size', 10)
+    try:
+        test_info = load_test_info(model_path)
+        images_dir, annotations_file = resolve_paths(test_info)
+    except FileNotFoundError as e:
+        print(f"   {e}")
+        return None
 
-    print(f"\n📂 Test set: {len(test_image_ids)} images | {images_dir}")
+    test_image_ids = test_info['test_image_ids']
+    min_crop_size  = test_info.get('min_crop_size', 10)
+    print(f"   Test set: {len(test_image_ids)} images | {images_dir}")
 
     timestamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = os.path.join(CONFIG["output_dir"], f"eval_{mode}_{timestamp}")
+    suffix     = f"_{label}" if label else ""
+    output_dir = os.path.join(CONFIG["output_dir"], f"eval_{eval_mode}{suffix}_{timestamp}")
     os.makedirs(output_dir, exist_ok=True)
 
     results = {}
     coco    = COCO(annotations_file)
 
-    if mode in ('crops', 'both'):
+    if eval_mode in ('crops', 'both'):
         r = run_crop_evaluation(
             model, images_dir, annotations_file, test_image_ids,
             cat_mapping, class_names, image_size, min_crop_size, device, output_dir
@@ -508,7 +521,7 @@ def evaluate(mode='both', score_threshold=None, nms_iou=None):
         if r:
             results['crops'] = r
 
-    if mode in ('detect', 'both'):
+    if eval_mode in ('detect', 'both'):
         r = run_detection_evaluation(
             model, coco, images_dir, test_image_ids,
             cat_mapping, class_names, image_size, device,
@@ -518,24 +531,56 @@ def evaluate(mode='both', score_threshold=None, nms_iou=None):
         if r:
             results['detection'] = r
 
-    # Sauvegarde
     with open(os.path.join(output_dir, "evaluation_results.json"), 'w') as f:
         json.dump(results, f, indent=2)
-
-    print(f"\n   📁 Résultats: {output_dir}")
+    print(f"\n   Resultats: {output_dir}")
     return results
 
 
+def evaluate(eval_mode='both', score_threshold=None, nms_iou=None):
+    score_threshold = score_threshold or CONFIG["score_threshold"]
+    nms_iou         = nms_iou         or CONFIG["nms_iou"]
+    device          = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+
+    env_model = CONFIG["model_path"]
+    if env_model and os.path.exists(env_model):
+        return _evaluate_one(env_model, eval_mode, score_threshold, nms_iou, device)
+
+    # Essayer modele unifie d'abord
+    unified = find_best_model(sub=None)
+    if unified:
+        print(f"   Modele auto-detecte: {unified}")
+        return _evaluate_one(unified, eval_mode, score_threshold, nms_iou, device)
+
+    # Sinon dual nadir + oblique
+    print("\n   Aucun modele unifie trouve → evaluation nadir + oblique")
+    all_results = {}
+    for sub_mode in ("nadir", "oblique"):
+        mp = find_best_model(sub=sub_mode)
+        if mp:
+            print(f"   Modele {sub_mode} auto-detecte: {mp}")
+            r = _evaluate_one(mp, eval_mode, score_threshold, nms_iou, device, label=sub_mode)
+            if r:
+                all_results[sub_mode] = r
+        else:
+            print(f"   Modele {sub_mode} introuvable.")
+
+    if not all_results:
+        print("\n   Aucun modele trouve. Lancez d'abord train.py")
+        return {}
+
+    return all_results
+
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Évaluation EfficientNet-B3 Perso")
+    parser = argparse.ArgumentParser(description="Evaluation EfficientNet-B3 Perso")
     parser.add_argument('--mode',            default='both',
                         choices=['crops', 'detect', 'both'],
-                        help="Mode d'évaluation (défaut: both)")
-    parser.add_argument('--score-threshold', default=None, type=float,
-                        help="Seuil confiance pour détection (défaut: .env SCORE_THRESHOLD)")
-    parser.add_argument('--nms-iou',         default=None, type=float,
-                        help="Seuil IoU NMS (défaut: .env NMS_IOU)")
+                        help="Mode d'evaluation (defaut: both)")
+    parser.add_argument('--score-threshold', default=None, type=float)
+    parser.add_argument('--nms-iou',         default=None, type=float)
     args = parser.parse_args()
-    evaluate(mode=args.mode,
+    evaluate(eval_mode=args.mode,
              score_threshold=args.score_threshold,
              nms_iou=args.nms_iou)
